@@ -1,0 +1,12 @@
+/build/*
+!/build/.gitkeep
+/rw
+/rw.exe
+*.o
+*.obj
+*.out
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
