@@ -1,7 +1,10 @@
+#include "control_atomico_rw.h"
+#include "monitor_rw.h"
 #include "tipos.h"
 
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <string>
 
 struct Config{
@@ -159,21 +162,49 @@ int main(int argc, char *argv[]){
     Politica politica=
         convertir_politica(config.politica_texto);
 
-    (void)politica;
+    // Ambas implementaciones utilizan la misma interfaz ControlRW.
+    std::unique_ptr<ControlRW> control;
+
+    if(config.modo== "cond"){
+        control= std::make_unique<MonitorRW>(
+            politica,
+            config.traza
+        );
+    }
+    else{
+        control= std::make_unique<ControlAtomicoRW>();
+    }
+
+    // Unico registro compartido por todas las hebras.
+    Registro registro;
 
     std::cout << "Configuracion valida\n";
-    std::cout << "Modo: " << config.modo << "\n";
+    std::cout << "Modo: "
+              << config.modo << "\n";
+
     std::cout << "Politica: "
               << config.politica_texto << "\n";
+
     std::cout << "Lectoras: "
               << config.L << "\n";
+
     std::cout << "Escritoras: "
               << config.E << "\n";
+
     std::cout << "K: "
               << config.K << "\n";
+
     std::cout << "Traza: "
               << (config.traza ? "SI" : "NO")
               << "\n";
+
+    std::cout << "Registro inicial: version="
+              << registro.version
+              << ", doble_version="
+              << registro.doble_version
+              << "\n";
+
+    std::cout << "Control de sincronizacion creado\n";
 
     return 0;
 }
