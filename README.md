@@ -14,8 +14,17 @@ Ramas sugeridas: `feat/monitor`, `feat/atomicos`, `feat/ejecucion` y `feat/verif
 
 ## Compilación y ejecución
 
-La estructura inicial todavía no incluye código ni Makefile. Consultar `readme.txt` para
-los comandos previstos y completar allí las instrucciones reproducibles al implementar el programa.
+En Linux o WSL, compilar con `make`. El principal actual valida los argumentos y
+crea el control y el registro; la ejecucion de hebras sigue pendiente.
+
+Para probar por separado el monitor de prioridad de lectores y escritores:
+
+```sh
+make test-monitor
+```
+
+Ver [docs/MONITOR.md](docs/MONITOR.md) para las condiciones de entrada, las trazas
+y la integracion pendiente de FIFO.
 
 ## Entrega
 
