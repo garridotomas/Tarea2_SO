@@ -2,10 +2,14 @@
 #include "monitor_rw.h"
 #include "tipos.h"
 
+#include <chrono>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <string>
+#include <system_error>
+#include <thread>
+#include <vector>
 
 struct Config{
     std::string modo;
@@ -162,7 +166,6 @@ int main(int argc, char *argv[]){
     Politica politica=
         convertir_politica(config.politica_texto);
 
-    // Ambas implementaciones utilizan la misma interfaz ControlRW.
     std::unique_ptr<ControlRW> control;
 
     if(config.modo== "cond"){
@@ -175,36 +178,152 @@ int main(int argc, char *argv[]){
         control= std::make_unique<ControlAtomicoRW>();
     }
 
-    // Unico registro compartido por todas las hebras.
+    // Un unico registro compartido.
     Registro registro;
 
-    std::cout << "Configuracion valida\n";
-    std::cout << "Modo: "
-              << config.modo << "\n";
+    // Aqui se guardan todas las hebras creadas.
+    std::vector<std::thread> hebras;
+    hebras.reserve(config.L + config.E);
 
-    std::cout << "Politica: "
-              << config.politica_texto << "\n";
+    bool error_creacion= false;
 
-    std::cout << "Lectoras: "
-              << config.L << "\n";
+    // -------------------------
+    // HEBRAS LECTORAS
+    // -------------------------
 
-    std::cout << "Escritoras: "
-              << config.E << "\n";
+    for(int i= 0; i< config.L; i++){
+        try{
+            hebras.emplace_back([&, i](){
 
-    std::cout << "K: "
-              << config.K << "\n";
+                id_hebra= i;
 
-    std::cout << "Traza: "
-              << (config.traza ? "SI" : "NO")
-              << "\n";
+                for(long k= 0; k< config.K; k++){
 
-    std::cout << "Registro inicial: version="
-              << registro.version
-              << ", doble_version="
-              << registro.doble_version
-              << "\n";
+                    control->entrar_lectura();
 
-    std::cout << "Control de sincronizacion creado\n";
+                    // El acceso al registro ocurre
+                    // dentro del intervalo admitido.
+                    long version= registro.version;
+                    long doble_version=
+                        registro.doble_version;
+
+                    // Por ahora solo realizamos la lectura.
+                    (void)version;
+                    (void)doble_version;
+
+                    if(config.dur_lec_us> 0){
+                        std::this_thread::sleep_for(
+                            std::chrono::microseconds(
+                                config.dur_lec_us
+                            )
+                        );
+                    }
+
+                    control->salir_lectura();
+                }
+            });
+        }
+        catch(const std::system_error &e){
+            std::cerr
+                << "Error creando hebra lectora: "
+                << e.what()
+                << "\n";
+
+            error_creacion= true;
+            break;
+        }
+    }
+
+    // -------------------------
+    // HEBRAS ESCRITORAS
+    // -------------------------
+
+    if(!error_creacion){
+        for(int i= 0; i< config.E; i++){
+
+            int id= config.L + i;
+
+            try{
+                hebras.emplace_back([&, id](){
+
+                    id_hebra= id;
+
+                    for(long k= 0; k< config.K; k++){
+
+                        control->entrar_escritura();
+
+                        // La escritora modifica el
+                        // registro compartido.
+                        registro.version++;
+
+                        registro.doble_version=
+                            2 * registro.version;
+
+                        if(config.dur_esc_us> 0){
+                            std::this_thread::sleep_for(
+                                std::chrono::microseconds(
+                                    config.dur_esc_us
+                                )
+                            );
+                        }
+
+                        control->salir_escritura();
+                    }
+                });
+            }
+            catch(const std::system_error &e){
+                std::cerr
+                    << "Error creando hebra escritora: "
+                    << e.what()
+                    << "\n";
+
+                error_creacion= true;
+                break;
+            }
+        }
+    }
+
+    // Esperar todas las hebras que alcanzaron a crearse.
+    for(std::thread &hebra : hebras){
+        if(hebra.joinable()){
+            hebra.join();
+        }
+    }
+
+    if(error_creacion){
+        std::cerr
+            << "La ejecucion termino por error "
+            << "al crear hebras\n";
+
+        return 1;
+    }
+
+    std::cout << "\nEjecucion terminada\n";
+
+    std::cout
+        << "Hebras lectoras: "
+        << config.L
+        << "\n";
+
+    std::cout
+        << "Hebras escritoras: "
+        << config.E
+        << "\n";
+
+    std::cout
+        << "Operaciones por hebra: "
+        << config.K
+        << "\n";
+
+    std::cout
+        << "Version final: "
+        << registro.version
+        << "\n";
+
+    std::cout
+        << "Doble version final: "
+        << registro.doble_version
+        << "\n";
 
     return 0;
 }
