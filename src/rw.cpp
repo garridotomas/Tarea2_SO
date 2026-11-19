@@ -4,12 +4,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <time.h>
 #include <vector>
 
 struct Config{
@@ -24,6 +26,11 @@ struct Config{
     long dur_esc_us= 0;
 
     bool traza= true;
+};
+
+struct MedicionHebra{
+    long long espera_total_ns= 0;
+    long long espera_max_ns= 0;
 };
 
 bool convertir_long(const char *texto, long &valor){
@@ -157,6 +164,20 @@ Politica convertir_politica(const std::string &texto){
     return Politica::Fifo;
 }
 
+double diferencia_cpu(
+    const timespec &inicio,
+    const timespec &fin
+){
+    double segundos=
+        static_cast<double>(fin.tv_sec - inicio.tv_sec);
+
+    double nanosegundos=
+        static_cast<double>(fin.tv_nsec - inicio.tv_nsec)
+        / 1000000000.0;
+
+    return segundos + nanosegundos;
+}
+
 int main(int argc, char *argv[]){
     Config config;
 
@@ -179,24 +200,43 @@ int main(int argc, char *argv[]){
         control= std::make_unique<ControlAtomicoRW>();
     }
 
-    // Un unico registro compartido.
     Registro registro;
 
-    // Contadores de diagnostico.
-    // No participan en las decisiones de admision.
     std::atomic<int> lectores_dentro{0};
     std::atomic<int> escritores_dentro{0};
-
     std::atomic<int> max_lectores{0};
 
     std::atomic<long> inconsistencias{0};
     std::atomic<long> violaciones_exclusion{0};
 
-    std::vector<std::thread> hebras;
+    int total_hebras=
+        config.L + config.E;
 
-    hebras.reserve(config.L + config.E);
+    std::vector<MedicionHebra> mediciones(
+        total_hebras
+    );
+
+    std::vector<std::thread> hebras;
+    hebras.reserve(total_hebras);
 
     bool error_creacion= false;
+
+    // Inicio de la region de medicion.
+    auto pared_inicio=
+        std::chrono::steady_clock::now();
+
+    timespec cpu_inicio{};
+    timespec cpu_fin{};
+
+    if(clock_gettime(
+        CLOCK_PROCESS_CPUTIME_ID,
+        &cpu_inicio
+    )== -1){
+        std::cerr
+            << "Error al medir tiempo de CPU\n";
+
+        return 1;
+    }
 
     // -------------------------
     // HEBRAS LECTORAS
@@ -210,37 +250,58 @@ int main(int argc, char *argv[]){
 
                 for(long k= 0; k< config.K; k++){
 
+                    // La espera se mide desde antes
+                    // de entrar hasta que entrar_lectura retorna.
+                    auto inicio_espera=
+                        std::chrono::steady_clock::now();
+
                     control->entrar_lectura();
+
+                    auto fin_espera=
+                        std::chrono::steady_clock::now();
+
+                    long long espera_ns=
+                        std::chrono::duration_cast<
+                            std::chrono::nanoseconds
+                        >(
+                            fin_espera - inicio_espera
+                        ).count();
+
+                    mediciones[i].espera_total_ns+=
+                        espera_ns;
+
+                    if(espera_ns>
+                       mediciones[i].espera_max_ns){
+
+                        mediciones[i].espera_max_ns=
+                            espera_ns;
+                    }
 
                     int lectores_actuales=
                         lectores_dentro.fetch_add(1) + 1;
 
-                    // Actualizar maximo de lectoras
-                    // que estuvieron simultaneamente.
                     int max_actual=
                         max_lectores.load();
 
-                    while(lectores_actuales> max_actual &&
-                          !max_lectores.compare_exchange_weak(
-                              max_actual,
-                              lectores_actuales
-                          )){
+                    while(
+                        lectores_actuales> max_actual &&
+                        !max_lectores.compare_exchange_weak(
+                            max_actual,
+                            lectores_actuales
+                        )
+                    ){
                     }
 
-                    // Una lectora nunca debe coincidir
-                    // con una escritora.
                     if(escritores_dentro.load()!= 0){
                         violaciones_exclusion.fetch_add(1);
                     }
 
-                    // Lectura del registro compartido.
                     long version=
                         registro.version;
 
                     long doble_version=
                         registro.doble_version;
 
-                    // Invariante del registro.
                     if(doble_version!= 2 * version){
                         inconsistencias.fetch_add(1);
                     }
@@ -277,7 +338,8 @@ int main(int argc, char *argv[]){
     if(!error_creacion){
         for(int i= 0; i< config.E; i++){
 
-            int id= config.L + i;
+            int id=
+                config.L + i;
 
             try{
                 hebras.emplace_back([&, id](){
@@ -286,15 +348,38 @@ int main(int argc, char *argv[]){
 
                     for(long k= 0; k< config.K; k++){
 
+                        auto inicio_espera=
+                            std::chrono::steady_clock::now();
+
                         control->entrar_escritura();
+
+                        auto fin_espera=
+                            std::chrono::steady_clock::now();
+
+                        long long espera_ns=
+                            std::chrono::duration_cast<
+                                std::chrono::nanoseconds
+                            >(
+                                fin_espera - inicio_espera
+                            ).count();
+
+                        mediciones[id].espera_total_ns+=
+                            espera_ns;
+
+                        if(espera_ns>
+                           mediciones[id].espera_max_ns){
+
+                            mediciones[id].espera_max_ns=
+                                espera_ns;
+                        }
 
                         int escritoras_previas=
                             escritores_dentro.fetch_add(1);
 
-                        // Una escritora debe estar completamente sola.
-                        if(escritoras_previas!= 0 ||
-                           lectores_dentro.load()!= 0){
-
+                        if(
+                            escritoras_previas!= 0 ||
+                            lectores_dentro.load()!= 0
+                        ){
                             violaciones_exclusion.fetch_add(1);
                         }
 
@@ -329,11 +414,24 @@ int main(int argc, char *argv[]){
         }
     }
 
-    // Esperar todas las hebras creadas.
     for(std::thread &hebra : hebras){
         if(hebra.joinable()){
             hebra.join();
         }
+    }
+
+    // Fin de la region de medicion.
+    auto pared_fin=
+        std::chrono::steady_clock::now();
+
+    if(clock_gettime(
+        CLOCK_PROCESS_CPUTIME_ID,
+        &cpu_fin
+    )== -1){
+        std::cerr
+            << "Error al medir tiempo de CPU\n";
+
+        return 1;
     }
 
     if(error_creacion){
@@ -345,7 +443,7 @@ int main(int argc, char *argv[]){
     }
 
     // -------------------------
-    // INVARIANTES FINALES
+    // INVARIANTES
     // -------------------------
 
     long version_esperada=
@@ -365,10 +463,94 @@ int main(int argc, char *argv[]){
         inconsistencias.load()== 0;
 
     // -------------------------
+    // MEDICIONES
+    // -------------------------
+
+    double tiempo_pared=
+        std::chrono::duration<double>(
+            pared_fin - pared_inicio
+        ).count();
+
+    double tiempo_cpu=
+        diferencia_cpu(
+            cpu_inicio,
+            cpu_fin
+        );
+
+    long long total_espera_lectoras= 0;
+    long long total_espera_escritoras= 0;
+
+    long long max_espera_lectoras= 0;
+    long long max_espera_escritoras= 0;
+
+    for(int i= 0; i< config.L; i++){
+
+        total_espera_lectoras+=
+            mediciones[i].espera_total_ns;
+
+        if(mediciones[i].espera_max_ns>
+           max_espera_lectoras){
+
+            max_espera_lectoras=
+                mediciones[i].espera_max_ns;
+        }
+    }
+
+    for(int i= config.L;
+        i< total_hebras;
+        i++){
+
+        total_espera_escritoras+=
+            mediciones[i].espera_total_ns;
+
+        if(mediciones[i].espera_max_ns>
+           max_espera_escritoras){
+
+            max_espera_escritoras=
+                mediciones[i].espera_max_ns;
+        }
+    }
+
+    long operaciones_lectura=
+        static_cast<long>(config.L) *
+        config.K;
+
+    long operaciones_escritura=
+        static_cast<long>(config.E) *
+        config.K;
+
+    double promedio_espera_lectoras_us=
+        static_cast<double>(
+            total_espera_lectoras
+        )
+        / operaciones_lectura
+        / 1000.0;
+
+    double promedio_espera_escritoras_us=
+        static_cast<double>(
+            total_espera_escritoras
+        )
+        / operaciones_escritura
+        / 1000.0;
+
+    double max_espera_lectoras_us=
+        static_cast<double>(
+            max_espera_lectoras
+        )
+        / 1000.0;
+
+    double max_espera_escritoras_us=
+        static_cast<double>(
+            max_espera_escritoras
+        )
+        / 1000.0;
+
+    // -------------------------
     // RESUMEN
     // -------------------------
 
-    std::cout << "\n========== RESUMEN ==========\n";
+    std::cout
+        << "\n========== RESUMEN ==========\n";
 
     std::cout
         << "Modo: "
@@ -378,21 +560,6 @@ int main(int argc, char *argv[]){
     std::cout
         << "Politica: "
         << config.politica_texto
-        << "\n";
-
-    std::cout
-        << "Lectoras: "
-        << config.L
-        << "\n";
-
-    std::cout
-        << "Escritoras: "
-        << config.E
-        << "\n";
-
-    std::cout
-        << "K: "
-        << config.K
         << "\n";
 
     std::cout
@@ -437,6 +604,40 @@ int main(int argc, char *argv[]){
     std::cout
         << "Lecturas consistentes: "
         << (lecturas_correctas ? "SI" : "NO")
+        << "\n";
+
+    std::cout
+        << std::fixed
+        << std::setprecision(6);
+
+    std::cout
+        << "Tiempo pared (s): "
+        << tiempo_pared
+        << "\n";
+
+    std::cout
+        << "Tiempo CPU (s): "
+        << tiempo_cpu
+        << "\n";
+
+    std::cout
+        << "Espera promedio lectoras (us): "
+        << promedio_espera_lectoras_us
+        << "\n";
+
+    std::cout
+        << "Espera maxima lectoras (us): "
+        << max_espera_lectoras_us
+        << "\n";
+
+    std::cout
+        << "Espera promedio escritoras (us): "
+        << promedio_espera_escritoras_us
+        << "\n";
+
+    std::cout
+        << "Espera maxima escritoras (us): "
+        << max_espera_escritoras_us
         << "\n";
 
     return 0;
