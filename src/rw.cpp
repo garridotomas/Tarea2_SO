@@ -2,6 +2,7 @@
 #include "monitor_rw.h"
 #include "tipos.h"
 
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <limits>
@@ -181,8 +182,18 @@ int main(int argc, char *argv[]){
     // Un unico registro compartido.
     Registro registro;
 
-    // Aqui se guardan todas las hebras creadas.
+    // Contadores de diagnostico.
+    // No participan en las decisiones de admision.
+    std::atomic<int> lectores_dentro{0};
+    std::atomic<int> escritores_dentro{0};
+
+    std::atomic<int> max_lectores{0};
+
+    std::atomic<long> inconsistencias{0};
+    std::atomic<long> violaciones_exclusion{0};
+
     std::vector<std::thread> hebras;
+
     hebras.reserve(config.L + config.E);
 
     bool error_creacion= false;
@@ -201,15 +212,38 @@ int main(int argc, char *argv[]){
 
                     control->entrar_lectura();
 
-                    // El acceso al registro ocurre
-                    // dentro del intervalo admitido.
-                    long version= registro.version;
+                    int lectores_actuales=
+                        lectores_dentro.fetch_add(1) + 1;
+
+                    // Actualizar maximo de lectoras
+                    // que estuvieron simultaneamente.
+                    int max_actual=
+                        max_lectores.load();
+
+                    while(lectores_actuales> max_actual &&
+                          !max_lectores.compare_exchange_weak(
+                              max_actual,
+                              lectores_actuales
+                          )){
+                    }
+
+                    // Una lectora nunca debe coincidir
+                    // con una escritora.
+                    if(escritores_dentro.load()!= 0){
+                        violaciones_exclusion.fetch_add(1);
+                    }
+
+                    // Lectura del registro compartido.
+                    long version=
+                        registro.version;
+
                     long doble_version=
                         registro.doble_version;
 
-                    // Por ahora solo realizamos la lectura.
-                    (void)version;
-                    (void)doble_version;
+                    // Invariante del registro.
+                    if(doble_version!= 2 * version){
+                        inconsistencias.fetch_add(1);
+                    }
 
                     if(config.dur_lec_us> 0){
                         std::this_thread::sleep_for(
@@ -218,6 +252,8 @@ int main(int argc, char *argv[]){
                             )
                         );
                     }
+
+                    lectores_dentro.fetch_sub(1);
 
                     control->salir_lectura();
                 }
@@ -252,8 +288,16 @@ int main(int argc, char *argv[]){
 
                         control->entrar_escritura();
 
-                        // La escritora modifica el
-                        // registro compartido.
+                        int escritoras_previas=
+                            escritores_dentro.fetch_add(1);
+
+                        // Una escritora debe estar completamente sola.
+                        if(escritoras_previas!= 0 ||
+                           lectores_dentro.load()!= 0){
+
+                            violaciones_exclusion.fetch_add(1);
+                        }
+
                         registro.version++;
 
                         registro.doble_version=
@@ -266,6 +310,8 @@ int main(int argc, char *argv[]){
                                 )
                             );
                         }
+
+                        escritores_dentro.fetch_sub(1);
 
                         control->salir_escritura();
                     }
@@ -283,7 +329,7 @@ int main(int argc, char *argv[]){
         }
     }
 
-    // Esperar todas las hebras que alcanzaron a crearse.
+    // Esperar todas las hebras creadas.
     for(std::thread &hebra : hebras){
         if(hebra.joinable()){
             hebra.join();
@@ -298,31 +344,99 @@ int main(int argc, char *argv[]){
         return 1;
     }
 
-    std::cout << "\nEjecucion terminada\n";
+    // -------------------------
+    // INVARIANTES FINALES
+    // -------------------------
+
+    long version_esperada=
+        static_cast<long>(config.E) * config.K;
+
+    long doble_esperada=
+        2 * version_esperada;
+
+    bool registro_correcto=
+        registro.version== version_esperada &&
+        registro.doble_version== doble_esperada;
+
+    bool exclusion_correcta=
+        violaciones_exclusion.load()== 0;
+
+    bool lecturas_correctas=
+        inconsistencias.load()== 0;
+
+    // -------------------------
+    // RESUMEN
+    // -------------------------
+
+    std::cout << "\n========== RESUMEN ==========\n";
 
     std::cout
-        << "Hebras lectoras: "
+        << "Modo: "
+        << config.modo
+        << "\n";
+
+    std::cout
+        << "Politica: "
+        << config.politica_texto
+        << "\n";
+
+    std::cout
+        << "Lectoras: "
         << config.L
         << "\n";
 
     std::cout
-        << "Hebras escritoras: "
+        << "Escritoras: "
         << config.E
         << "\n";
 
     std::cout
-        << "Operaciones por hebra: "
+        << "K: "
         << config.K
         << "\n";
 
     std::cout
         << "Version final: "
         << registro.version
+        << " / esperada: "
+        << version_esperada
         << "\n";
 
     std::cout
         << "Doble version final: "
         << registro.doble_version
+        << " / esperada: "
+        << doble_esperada
+        << "\n";
+
+    std::cout
+        << "Inconsistencias: "
+        << inconsistencias.load()
+        << "\n";
+
+    std::cout
+        << "Violaciones de exclusion: "
+        << violaciones_exclusion.load()
+        << "\n";
+
+    std::cout
+        << "Maximo lectoras simultaneas: "
+        << max_lectores.load()
+        << "\n";
+
+    std::cout
+        << "Registro correcto: "
+        << (registro_correcto ? "SI" : "NO")
+        << "\n";
+
+    std::cout
+        << "Exclusion correcta: "
+        << (exclusion_correcta ? "SI" : "NO")
+        << "\n";
+
+    std::cout
+        << "Lecturas consistentes: "
+        << (lecturas_correctas ? "SI" : "NO")
         << "\n";
 
     return 0;
