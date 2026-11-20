@@ -1,10 +1,12 @@
 #include "control_atomico_rw.h"
 #include "monitor_rw.h"
 #include "tipos.h"
+#include "verificador.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -193,14 +195,23 @@ int main(int argc, char *argv[]){
 
     std::unique_ptr<ControlRW> control;
 
+    // Se guarda este puntero para obtener la traza
+    // cuando se utiliza la implementacion cond.
+    MonitorRW *monitor= nullptr;
+
     if(config.modo== "cond"){
-        control= std::make_unique<MonitorRW>(
-            politica,
-            config.traza
-        );
+        auto nuevo_monitor=
+            std::make_unique<MonitorRW>(
+                politica,
+                config.traza
+            );
+
+        monitor= nuevo_monitor.get();
+        control= std::move(nuevo_monitor);
     }
     else{
-        control= std::make_unique<ControlAtomicoRW>();
+        control=
+            std::make_unique<ControlAtomicoRW>();
     }
 
     Registro registro;
@@ -249,9 +260,6 @@ int main(int argc, char *argv[]){
             hebras.emplace_back([&, i](){
 
                 id_hebra= i;
-
-                // Cada hebra mantiene sus propios
-                // contadores de intentos fallidos.
                 intentos_hebra= {};
 
                 for(long k= 0; k< config.K; k++){
@@ -323,7 +331,6 @@ int main(int argc, char *argv[]){
                     control->salir_lectura();
                 }
 
-                // Guardar los intentos locales de esta hebra.
                 mediciones[i].intentos=
                     intentos_hebra;
             });
@@ -353,7 +360,6 @@ int main(int argc, char *argv[]){
                 hebras.emplace_back([&, id](){
 
                     id_hebra= id;
-
                     intentos_hebra= {};
 
                     for(long k= 0; k< config.K; k++){
@@ -578,6 +584,62 @@ int main(int argc, char *argv[]){
     }
 
     // -------------------------
+    // TRAZA Y VERIFICADOR
+    // -------------------------
+
+    bool politica_ok= true;
+    long evidencia= 0;
+
+    if(config.modo== "cond" &&
+       config.traza &&
+       monitor!= nullptr){
+
+        try{
+            std::vector<AnotacionTraza> traza=
+                monitor->obtener_traza();
+
+            ResultadoVerificacion resultado=
+                verificar_traza(
+                    traza,
+                    politica
+                );
+
+            politica_ok=
+                resultado.politica_ok;
+
+            evidencia=
+                resultado.evidencia;
+
+            if(!politica_ok){
+                std::cerr
+                    << "Error de politica en anotacion "
+                    << resultado.indice_error
+                    << ": "
+                    << resultado.detalle
+                    << "\n";
+            }
+        }
+        catch(const std::exception &e){
+            std::cerr
+                << "Error en verificacion de traza: "
+                << e.what()
+                << "\n";
+
+            politica_ok= false;
+        }
+    }
+
+    // -------------------------
+    // RESULTADO GLOBAL
+    // -------------------------
+
+    bool correcto=
+        registro_correcto &&
+        exclusion_correcta &&
+        lecturas_correctas &&
+        politica_ok;
+
+    // -------------------------
     // RESUMEN
     // -------------------------
 
@@ -621,21 +683,6 @@ int main(int argc, char *argv[]){
     std::cout
         << "Maximo lectoras simultaneas: "
         << max_lectores.load()
-        << "\n";
-
-    std::cout
-        << "Registro correcto: "
-        << (registro_correcto ? "SI" : "NO")
-        << "\n";
-
-    std::cout
-        << "Exclusion correcta: "
-        << (exclusion_correcta ? "SI" : "NO")
-        << "\n";
-
-    std::cout
-        << "Lecturas consistentes: "
-        << (lecturas_correctas ? "SI" : "NO")
         << "\n";
 
     std::cout
@@ -690,5 +737,24 @@ int main(int argc, char *argv[]){
             << "\n";
     }
 
-    return 0;
+    if(config.modo== "cond" &&
+       config.traza){
+
+        std::cout
+            << "Politica OK: "
+            << (politica_ok ? "SI" : "NO")
+            << "\n";
+
+        std::cout
+            << "Evidencia: "
+            << evidencia
+            << "\n";
+    }
+
+    std::cout
+        << "Correcto: "
+        << (correcto ? "SI" : "NO")
+        << "\n";
+
+    return correcto ? 0 : 1;
 }
