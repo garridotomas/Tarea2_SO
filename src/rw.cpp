@@ -36,6 +36,9 @@ struct MedicionHebra{
     long long espera_max_ns= 0;
 
     IntentosFallidos intentos{};
+
+    bool error= false;
+    std::string mensaje_error;
 };
 
 bool convertir_long(const char *texto, long &valor){
@@ -195,8 +198,6 @@ int main(int argc, char *argv[]){
 
     std::unique_ptr<ControlRW> control;
 
-    // Se guarda este puntero para obtener la traza
-    // cuando se utiliza la implementacion cond.
     MonitorRW *monitor= nullptr;
 
     if(config.modo== "cond"){
@@ -258,81 +259,92 @@ int main(int argc, char *argv[]){
     for(int i= 0; i< config.L; i++){
         try{
             hebras.emplace_back([&, i](){
+                try{
+                    id_hebra= i;
+                    intentos_hebra= {};
 
-                id_hebra= i;
-                intentos_hebra= {};
+                    for(long k= 0; k< config.K; k++){
 
-                for(long k= 0; k< config.K; k++){
+                        auto inicio_espera=
+                            std::chrono::steady_clock::now();
 
-                    auto inicio_espera=
-                        std::chrono::steady_clock::now();
+                        control->entrar_lectura();
 
-                    control->entrar_lectura();
+                        auto fin_espera=
+                            std::chrono::steady_clock::now();
 
-                    auto fin_espera=
-                        std::chrono::steady_clock::now();
+                        long long espera_ns=
+                            std::chrono::duration_cast<
+                                std::chrono::nanoseconds
+                            >(
+                                fin_espera - inicio_espera
+                            ).count();
 
-                    long long espera_ns=
-                        std::chrono::duration_cast<
-                            std::chrono::nanoseconds
-                        >(
-                            fin_espera - inicio_espera
-                        ).count();
-
-                    mediciones[i].espera_total_ns+=
-                        espera_ns;
-
-                    if(espera_ns>
-                       mediciones[i].espera_max_ns){
-
-                        mediciones[i].espera_max_ns=
+                        mediciones[i].espera_total_ns+=
                             espera_ns;
-                    }
 
-                    int lectores_actuales=
-                        lectores_dentro.fetch_add(1) + 1;
+                        if(espera_ns>
+                           mediciones[i].espera_max_ns){
 
-                    int max_actual=
-                        max_lectores.load();
+                            mediciones[i].espera_max_ns=
+                                espera_ns;
+                        }
 
-                    while(
-                        lectores_actuales> max_actual &&
-                        !max_lectores.compare_exchange_weak(
-                            max_actual,
-                            lectores_actuales
-                        )
-                    ){
-                    }
+                        int lectores_actuales=
+                            lectores_dentro.fetch_add(1) + 1;
 
-                    if(escritores_dentro.load()!= 0){
-                        violaciones_exclusion.fetch_add(1);
-                    }
+                        int max_actual=
+                            max_lectores.load();
 
-                    long version=
-                        registro.version;
-
-                    long doble_version=
-                        registro.doble_version;
-
-                    if(doble_version!= 2 * version){
-                        inconsistencias.fetch_add(1);
-                    }
-
-                    if(config.dur_lec_us> 0){
-                        std::this_thread::sleep_for(
-                            std::chrono::microseconds(
-                                config.dur_lec_us
+                        while(
+                            lectores_actuales> max_actual &&
+                            !max_lectores.compare_exchange_weak(
+                                max_actual,
+                                lectores_actuales
                             )
-                        );
+                        ){
+                        }
+
+                        if(escritores_dentro.load()!= 0){
+                            violaciones_exclusion.fetch_add(1);
+                        }
+
+                        long version=
+                            registro.version;
+
+                        long doble_version=
+                            registro.doble_version;
+
+                        if(doble_version!= 2 * version){
+                            inconsistencias.fetch_add(1);
+                        }
+
+                        if(config.dur_lec_us> 0){
+                            std::this_thread::sleep_for(
+                                std::chrono::microseconds(
+                                    config.dur_lec_us
+                                )
+                            );
+                        }
+
+                        lectores_dentro.fetch_sub(1);
+
+                        control->salir_lectura();
                     }
 
-                    lectores_dentro.fetch_sub(1);
-
-                    control->salir_lectura();
+                    mediciones[i].intentos=
+                        intentos_hebra;
                 }
-
-                mediciones[i].intentos=
-                    intentos_hebra;
+                catch(const std::exception &e){
+                    mediciones[i].error= true;
+                    mediciones[i].mensaje_error=
+                        e.what();
+                }
+                catch(...){
+                    mediciones[i].error= true;
+                    mediciones[i].mensaje_error=
+                        "Error desconocido";
+                }
             });
         }
         catch(const std::system_error &e){
@@ -358,67 +370,78 @@ int main(int argc, char *argv[]){
 
             try{
                 hebras.emplace_back([&, id](){
+                    try{
+                        id_hebra= id;
+                        intentos_hebra= {};
 
-                    id_hebra= id;
-                    intentos_hebra= {};
+                        for(long k= 0; k< config.K; k++){
 
-                    for(long k= 0; k< config.K; k++){
+                            auto inicio_espera=
+                                std::chrono::steady_clock::now();
 
-                        auto inicio_espera=
-                            std::chrono::steady_clock::now();
+                            control->entrar_escritura();
 
-                        control->entrar_escritura();
+                            auto fin_espera=
+                                std::chrono::steady_clock::now();
 
-                        auto fin_espera=
-                            std::chrono::steady_clock::now();
+                            long long espera_ns=
+                                std::chrono::duration_cast<
+                                    std::chrono::nanoseconds
+                                >(
+                                    fin_espera - inicio_espera
+                                ).count();
 
-                        long long espera_ns=
-                            std::chrono::duration_cast<
-                                std::chrono::nanoseconds
-                            >(
-                                fin_espera - inicio_espera
-                            ).count();
-
-                        mediciones[id].espera_total_ns+=
-                            espera_ns;
-
-                        if(espera_ns>
-                           mediciones[id].espera_max_ns){
-
-                            mediciones[id].espera_max_ns=
+                            mediciones[id].espera_total_ns+=
                                 espera_ns;
+
+                            if(espera_ns>
+                               mediciones[id].espera_max_ns){
+
+                                mediciones[id].espera_max_ns=
+                                    espera_ns;
+                            }
+
+                            int escritoras_previas=
+                                escritores_dentro.fetch_add(1);
+
+                            if(
+                                escritoras_previas!= 0 ||
+                                lectores_dentro.load()!= 0
+                            ){
+                                violaciones_exclusion.fetch_add(1);
+                            }
+
+                            registro.version++;
+
+                            registro.doble_version=
+                                2 * registro.version;
+
+                            if(config.dur_esc_us> 0){
+                                std::this_thread::sleep_for(
+                                    std::chrono::microseconds(
+                                        config.dur_esc_us
+                                    )
+                                );
+                            }
+
+                            escritores_dentro.fetch_sub(1);
+
+                            control->salir_escritura();
                         }
 
-                        int escritoras_previas=
-                            escritores_dentro.fetch_add(1);
-
-                        if(
-                            escritoras_previas!= 0 ||
-                            lectores_dentro.load()!= 0
-                        ){
-                            violaciones_exclusion.fetch_add(1);
-                        }
-
-                        registro.version++;
-
-                        registro.doble_version=
-                            2 * registro.version;
-
-                        if(config.dur_esc_us> 0){
-                            std::this_thread::sleep_for(
-                                std::chrono::microseconds(
-                                    config.dur_esc_us
-                                )
-                            );
-                        }
-
-                        escritores_dentro.fetch_sub(1);
-
-                        control->salir_escritura();
+                        mediciones[id].intentos=
+                            intentos_hebra;
                     }
-
-                    mediciones[id].intentos=
-                        intentos_hebra;
+                    catch(const std::exception &e){
+                        mediciones[id].error= true;
+                        mediciones[id].mensaje_error=
+                            e.what();
+                    }
+                    catch(...){
+                        mediciones[id].error= true;
+                        mediciones[id].mensaje_error=
+                            "Error desconocido";
+                    }
                 });
             }
             catch(const std::system_error &e){
@@ -458,6 +481,21 @@ int main(int argc, char *argv[]){
             << "al crear hebras\n";
 
         return 1;
+    }
+
+    bool error_hebras= false;
+
+    for(int i= 0; i< total_hebras; i++){
+        if(mediciones[i].error){
+            error_hebras= true;
+
+            std::cerr
+                << "Error en hebra "
+                << i
+                << ": "
+                << mediciones[i].mensaje_error
+                << "\n";
+        }
     }
 
     // -------------------------
@@ -590,7 +628,8 @@ int main(int argc, char *argv[]){
     bool politica_ok= true;
     long evidencia= 0;
 
-    if(config.modo== "cond" &&
+    if(!error_hebras &&
+       config.modo== "cond" &&
        config.traza &&
        monitor!= nullptr){
 
@@ -629,11 +668,16 @@ int main(int argc, char *argv[]){
         }
     }
 
+    if(error_hebras){
+        politica_ok= false;
+    }
+
     // -------------------------
     // RESULTADO GLOBAL
     // -------------------------
 
     bool correcto=
+        !error_hebras &&
         registro_correcto &&
         exclusion_correcta &&
         lecturas_correctas &&
