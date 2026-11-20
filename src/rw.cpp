@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -31,6 +32,8 @@ struct Config{
 struct MedicionHebra{
     long long espera_total_ns= 0;
     long long espera_max_ns= 0;
+
+    IntentosFallidos intentos{};
 };
 
 bool convertir_long(const char *texto, long &valor){
@@ -221,7 +224,6 @@ int main(int argc, char *argv[]){
 
     bool error_creacion= false;
 
-    // Inicio de la region de medicion.
     auto pared_inicio=
         std::chrono::steady_clock::now();
 
@@ -248,10 +250,12 @@ int main(int argc, char *argv[]){
 
                 id_hebra= i;
 
+                // Cada hebra mantiene sus propios
+                // contadores de intentos fallidos.
+                intentos_hebra= {};
+
                 for(long k= 0; k< config.K; k++){
 
-                    // La espera se mide desde antes
-                    // de entrar hasta que entrar_lectura retorna.
                     auto inicio_espera=
                         std::chrono::steady_clock::now();
 
@@ -318,6 +322,10 @@ int main(int argc, char *argv[]){
 
                     control->salir_lectura();
                 }
+
+                // Guardar los intentos locales de esta hebra.
+                mediciones[i].intentos=
+                    intentos_hebra;
             });
         }
         catch(const std::system_error &e){
@@ -345,6 +353,8 @@ int main(int argc, char *argv[]){
                 hebras.emplace_back([&, id](){
 
                     id_hebra= id;
+
+                    intentos_hebra= {};
 
                     for(long k= 0; k< config.K; k++){
 
@@ -400,6 +410,9 @@ int main(int argc, char *argv[]){
 
                         control->salir_escritura();
                     }
+
+                    mediciones[id].intentos=
+                        intentos_hebra;
                 });
             }
             catch(const std::system_error &e){
@@ -420,7 +433,6 @@ int main(int argc, char *argv[]){
         }
     }
 
-    // Fin de la region de medicion.
     auto pared_fin=
         std::chrono::steady_clock::now();
 
@@ -546,6 +558,26 @@ int main(int argc, char *argv[]){
         / 1000.0;
 
     // -------------------------
+    // INTENTOS FALLIDOS ATOMIC
+    // -------------------------
+
+    std::uint64_t fallos_recurso_ocupado= 0;
+    std::uint64_t fallos_escritoras_esperando= 0;
+    std::uint64_t fallos_cas= 0;
+
+    for(const MedicionHebra &medicion : mediciones){
+
+        fallos_recurso_ocupado+=
+            medicion.intentos.recurso_ocupado;
+
+        fallos_escritoras_esperando+=
+            medicion.intentos.escritoras_esperando;
+
+        fallos_cas+=
+            medicion.intentos.cas_fallido;
+    }
+
+    // -------------------------
     // RESUMEN
     // -------------------------
 
@@ -639,6 +671,24 @@ int main(int argc, char *argv[]){
         << "Espera maxima escritoras (us): "
         << max_espera_escritoras_us
         << "\n";
+
+    if(config.modo== "atomic"){
+
+        std::cout
+            << "Fallos recurso ocupado: "
+            << fallos_recurso_ocupado
+            << "\n";
+
+        std::cout
+            << "Fallos escritoras esperando: "
+            << fallos_escritoras_esperando
+            << "\n";
+
+        std::cout
+            << "Fallos CAS: "
+            << fallos_cas
+            << "\n";
+    }
 
     return 0;
 }
