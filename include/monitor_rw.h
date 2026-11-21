@@ -5,7 +5,7 @@
 #include <mutex>
 #include <vector>
 
-// RESPONSABLE: integrante 1.
+// Monitor comun para las politicas de lectores y escritores.
 class MonitorRW : public ControlRW {
 public:
     explicit MonitorRW(
@@ -24,6 +24,13 @@ private:
     std::mutex m;
     std::vector<AnotacionTraza> traza;
 
-    // TODO(1): agregar contadores, condiciones y turnos.
-    // El estado de admision se protege siempre con m.
+    // Todo este estado se consulta y modifica con m adquirido.
+    std::condition_variable cambio_estado;
+    int lectoras_activas = 0;
+    int lectoras_esperando = 0;
+    int escritoras_esperando = 0;
+    bool escritora_activa = false;
+
+    // Solo se llama con m adquirido; FIFO agregara sus propios turnos.
+    void anotar(Tipo tipo, Accion accion);
 };
