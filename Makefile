@@ -22,3 +22,8 @@ clean:
 	$(RM) $(OBJECTS) $(DEPS) rw
 
 -include $(DEPS)
+
+test-atomico: build/comunes.o build/control_atomico_rw.o tests/prueba_atomico.cpp
+	mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ $(LDLIBS) -o build/prueba_atomico
+	./build/prueba_atomico
