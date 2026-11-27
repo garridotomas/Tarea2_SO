@@ -18,8 +18,19 @@ private:
         std::atomic<std::uint64_t>::is_always_lock_free,
         "Se requiere uint64_t atomic sin candado interno");
 
+    // Palabra de 64 bits:
+    // [63..33: libre] | [32..17: lectoras_activas] | [16..1: escritoras_esperando] | [0: escritora_activa]
     std::atomic<std::uint64_t> estado{0};
 
-    // TODO(2): definir campos de bits y sus mascaras.
-    // Admision mediante CAS exitoso sobre estado.
+    // Desplazamientos y mascaras para cada campo de bits
+    static constexpr std::uint64_t SHIFT_ESC_ACTIVA = 0;
+    static constexpr std::uint64_t MASK_ESC_ACTIVA  = 0x1ULL;
+
+    static constexpr std::uint64_t SHIFT_ESC_ESP    = 1;
+    static constexpr std::uint64_t MASK_ESC_ESP     = 0xFFFFULL << SHIFT_ESC_ESP;
+    static constexpr std::uint64_t UNO_ESC_ESP      = 1ULL << SHIFT_ESC_ESP;
+
+    static constexpr std::uint64_t SHIFT_LEC_ACT    = 17;
+    static constexpr std::uint64_t MASK_LEC_ACT     = 0xFFFFULL << SHIFT_LEC_ACT;
+    static constexpr std::uint64_t UNO_LEC_ACT      = 1ULL << SHIFT_LEC_ACT;
 };
